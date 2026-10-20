@@ -1,7 +1,11 @@
 <title>Davis Bellan Ltd</title>
+<meta name="description" content="Davis Bellan Ltd, based in Portsmouth, UK. Get in touch at info@davisbellan.com.">
+<meta name="theme-color" content="#070f26">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bodoni+Moda:ital,opsz,wght@0,6..96,400;1,6..96,400&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<link rel="preload" as="style" href="https://fonts.googleapis.com/css2?family=Bodoni+Moda:ital,opsz,wght@0,6..96,400;1,6..96,400&family=IBM+Plex+Mono:wght@400;500&display=swap&text=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789%20%40.%2C-%C2%B0%E2%80%B2%C2%B7%C2%A9%E2%86%92">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bodoni+Moda:ital,opsz,wght@0,6..96,400;1,6..96,400&family=IBM+Plex+Mono:wght@400;500&display=swap&text=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789%20%40.%2C-%C2%B0%E2%80%B2%C2%B7%C2%A9%E2%86%92" media="print" onload="this.media='all'">
+<noscript><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bodoni+Moda:ital,opsz,wght@0,6..96,400;1,6..96,400&family=IBM+Plex+Mono:wght@400;500&display=swap&text=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789%20%40.%2C-%C2%B0%E2%80%B2%C2%B7%C2%A9%E2%86%92"></noscript>
 <style>
 /* Layout: one full-bleed generative chart of Portsmouth Harbour; the name sits low-left like a chart cartouche. */
 :root {
@@ -27,12 +31,15 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 #tide {
+  opacity: 0;
+  transition: opacity 1.2s ease;
   position: fixed;
   inset: 0;
   width: 100%;
   height: 100%;
   display: block;
 }
+#tide.on { opacity: 1; }
 .veil {
   position: fixed;
   inset: 0;
@@ -163,227 +170,241 @@ h1 .ltd {
   // (bbox 50.765–50.860 N, 1.165–1.005 W). Each line: [x0, y0, dx1, dy1, dx2, dy2, ...].
   var MAP = __DATA__;
 
+  var DW = MAP.w, DH = MAP.h;
   var canvas = document.getElementById("tide");
   var gl = canvas.getContext("webgl", { antialias: true, alpha: false, premultipliedAlpha: false });
   if (!gl) return; // the CSS gradient remains as a quiet fallback
 
-  // ---------- randomness: a new seed on every load ----------
-  var seedArr = new Uint32Array(1);
-  (window.crypto || window.msCrypto).getRandomValues(seedArr);
-  var R = (function (a) {
-    return function () {
-      a |= 0; a = a + 0x6D2B79F5 | 0;
-      var t = Math.imul(a ^ a >>> 15, 1 | a);
-      t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
-      return ((t ^ t >>> 14) >>> 0) / 4294967296;
-    };
-  })(seedArr[0]);
-  function rr(a, b) { return a + (b - a) * R(); }
+  // ---------- generation (runs in a Web Worker so the page stays responsive) ----------
+  function generate(MAP, seed) {
+    "use strict";
+    // ---------- randomness: a new seed on every load ----------
+    var R = (function (a) {
+      return function () {
+        a |= 0; a = a + 0x6D2B79F5 | 0;
+        var t = Math.imul(a ^ a >>> 15, 1 | a);
+        t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+        return ((t ^ t >>> 14) >>> 0) / 4294967296;
+      };
+    })(seed);
+    function rr(a, b) { return a + (b - a) * R(); }
 
-  var DW = MAP.w, DH = MAP.h;
-  function decode(f) {
-    var out = [f[0], f[1]], x = f[0], y = f[1];
-    for (var i = 2; i < f.length; i += 2) { x += f[i]; y += f[i + 1]; out.push(x, y); }
-    return out;
-  }
-  var coast = MAP.coast.map(decode);
-  var roads = MAP.roads.map(function (rank) { return rank.map(decode); });
+    var DW = MAP.w, DH = MAP.h;
+    function decode(f) {
+      var out = [f[0], f[1]], x = f[0], y = f[1];
+      for (var i = 2; i < f.length; i += 2) { x += f[i]; y += f[i + 1]; out.push(x, y); }
+      return out;
+    }
+    var coast = MAP.coast.map(decode);
+    var roads = MAP.roads.map(function (rank) { return rank.map(decode); });
 
-  // ---------- distance fields on a coarse grid ----------
-  var CELL = 3, GW = Math.ceil(DW / CELL) + 1, GH = Math.ceil(DH / CELL) + 1, GN = GW * GH;
+    // ---------- distance fields on a coarse grid ----------
+    var CELL = 3, GW = Math.ceil(DW / CELL) + 1, GH = Math.ceil(DH / CELL) + 1, GN = GW * GH;
 
-  function sampleLines(lines, spacing) {
-    var xs = [], ys = [], tx = [], ty = [];
-    lines.forEach(function (p) {
-      for (var i = 0; i + 3 < p.length; i += 2) {
-        var ax = p[i], ay = p[i + 1], bx = p[i + 2], by = p[i + 3];
-        var dx = bx - ax, dy = by - ay, L = Math.hypot(dx, dy);
-        if (L < 1e-6) continue;
-        var n = Math.max(1, Math.ceil(L / spacing));
-        for (var k = 0; k < n; k++) {
-          var t = k / n;
-          xs.push(ax + dx * t); ys.push(ay + dy * t); tx.push(dx / L); ty.push(dy / L);
+    function sampleLines(lines, spacing) {
+      var xs = [], ys = [], tx = [], ty = [];
+      lines.forEach(function (p) {
+        for (var i = 0; i + 3 < p.length; i += 2) {
+          var ax = p[i], ay = p[i + 1], bx = p[i + 2], by = p[i + 3];
+          var dx = bx - ax, dy = by - ay, L = Math.hypot(dx, dy);
+          if (L < 1e-6) continue;
+          var n = Math.max(1, Math.ceil(L / spacing));
+          for (var k = 0; k < n; k++) {
+            var t = k / n;
+            xs.push(ax + dx * t); ys.push(ay + dy * t); tx.push(dx / L); ty.push(dy / L);
+          }
+        }
+      });
+      return { x: xs, y: ys, tx: tx, ty: ty, n: xs.length };
+    }
+
+    function nearestField(S) {
+      var near = new Int32Array(GN).fill(-1), d2 = new Float32Array(GN).fill(1e12);
+      for (var s = 0; s < S.n; s++) {
+        var gx = Math.round(S.x[s] / CELL), gy = Math.round(S.y[s] / CELL);
+        if (gx < 0 || gy < 0 || gx >= GW || gy >= GH) continue;
+        var i = gy * GW + gx, dx = gx * CELL - S.x[s], dy = gy * CELL - S.y[s], d = dx * dx + dy * dy;
+        if (d < d2[i]) { d2[i] = d; near[i] = s; }
+      }
+      function tryN(i, x, y, j) {
+        var s = near[j]; if (s < 0) return;
+        var dx = x * CELL - S.x[s], dy = y * CELL - S.y[s], d = dx * dx + dy * dy;
+        if (d < d2[i]) { d2[i] = d; near[i] = s; }
+      }
+      for (var pass = 0; pass < 2; pass++) {
+        var x, y, i;
+        for (y = 0; y < GH; y++) for (x = 0; x < GW; x++) {
+          i = y * GW + x;
+          if (x > 0) tryN(i, x, y, i - 1);
+          if (y > 0) { tryN(i, x, y, i - GW); if (x > 0) tryN(i, x, y, i - GW - 1); if (x < GW - 1) tryN(i, x, y, i - GW + 1); }
+        }
+        for (y = GH - 1; y >= 0; y--) for (x = GW - 1; x >= 0; x--) {
+          i = y * GW + x;
+          if (x < GW - 1) tryN(i, x, y, i + 1);
+          if (y < GH - 1) { tryN(i, x, y, i + GW); if (x < GW - 1) tryN(i, x, y, i + GW + 1); if (x > 0) tryN(i, x, y, i + GW - 1); }
         }
       }
+      return { near: near, d2: d2 };
+    }
+
+    // Signed distance to the coast: positive at sea. OSM coastlines keep land on the left.
+    var CS = sampleLines(coast, 1);
+    var CF = nearestField(CS);
+    var SD = new Float32Array(GN), sign = new Int8Array(GN), queue = new Int32Array(GN), qh = 0, qt = 0;
+    (function () {
+      var band = CELL * 2.2;
+      for (var i = 0; i < GN; i++) {
+        var s = CF.near[i]; if (s < 0) continue;
+        var d = Math.sqrt(CF.d2[i]);
+        if (d <= band) {
+          var x = (i % GW) * CELL, y = ((i / GW) | 0) * CELL;
+          var cr = CS.tx[s] * (y - CS.y[s]) - CS.ty[s] * (x - CS.x[s]);
+          sign[i] = cr >= 0 ? 1 : -1; queue[qt++] = i;
+        }
+      }
+      while (qh < qt) {
+        var j = queue[qh++], jx = j % GW, sg = sign[j];
+        if (jx > 0 && !sign[j - 1]) { sign[j - 1] = sg; queue[qt++] = j - 1; }
+        if (jx < GW - 1 && !sign[j + 1]) { sign[j + 1] = sg; queue[qt++] = j + 1; }
+        if (j >= GW && !sign[j - GW]) { sign[j - GW] = sg; queue[qt++] = j - GW; }
+        if (j + GW < GN && !sign[j + GW]) { sign[j + GW] = sg; queue[qt++] = j + GW; }
+      }
+      for (var k = 0; k < GN; k++) SD[k] = Math.sqrt(CF.d2[k]) * (sign[k] || 1);
+    })();
+
+    // Unsigned distance to any street.
+    var allRoads = roads[0].concat(roads[1], roads[2]);
+    var RF = nearestField(sampleLines(allRoads, 2));
+    var RD = new Float32Array(GN);
+    for (var k = 0; k < GN; k++) RD[k] = Math.sqrt(RF.d2[k]);
+
+    function sampleGrid(F, x, y) {
+      var gx = x / CELL, gy = y / CELL;
+      if (gx < 0) gx = 0; if (gy < 0) gy = 0;
+      if (gx > GW - 1.001) gx = GW - 1.001; if (gy > GH - 1.001) gy = GH - 1.001;
+      var ix = gx | 0, iy = gy | 0, fx = gx - ix, fy = gy - iy, i = iy * GW + ix;
+      var a = F[i], b = F[i + 1], c = F[i + GW], d = F[i + GW + 1];
+      return (a + (b - a) * fx) * (1 - fy) + (c + (d - c) * fx) * fy;
+    }
+    function sdAt(x, y) { return sampleGrid(SD, x, y); }
+    function rdAt(x, y) { return sampleGrid(RD, x, y); }
+
+    // ---------- geometry buffers ----------
+    var LV = []; // line vertices: x, y, sway, reveal, hue, alpha
+    var PV = []; // sparkle points: x, y, sway, reveal, phase, size
+    var MAX_SEG = 110000, segs = 0;
+    function seg(ax, ay, bx, by, w, rev, hue, a) {
+      LV.push(ax, ay, w, rev, hue, a, bx, by, w, rev, hue, a); segs++;
+    }
+
+    // Streets as the faint engraved plate. They surface outward from a random point on the shore.
+    var origin = (function () { var s = (R() * CS.n) | 0; return [CS.x[s], CS.y[s]]; })();
+    var maxR = Math.hypot(DW, DH);
+    [[0.30, 0.95], [0.22, 0.9], [0.11, 0.85]].forEach(function (style, rank) {
+      roads[rank].forEach(function (p) {
+        for (var i = 0; i + 3 < p.length; i += 2) {
+          var rv = 0.02 + Math.hypot(p[i] - origin[0], p[i + 1] - origin[1]) / maxR * 0.55;
+          seg(p[i], p[i + 1], p[i + 2], p[i + 3], 0.06, rv, style[1], style[0]);
+        }
+      });
     });
-    return { x: xs, y: ys, tx: tx, ty: ty, n: xs.length };
-  }
 
-  function nearestField(S) {
-    var near = new Int32Array(GN).fill(-1), d2 = new Float32Array(GN).fill(1e12);
-    for (var s = 0; s < S.n; s++) {
-      var gx = Math.round(S.x[s] / CELL), gy = Math.round(S.y[s] / CELL);
-      if (gx < 0 || gy < 0 || gx >= GW || gy >= GH) continue;
-      var i = gy * GW + gx, dx = gx * CELL - S.x[s], dy = gy * CELL - S.y[s], d = dx * dx + dy * dy;
-      if (d < d2[i]) { d2[i] = d; near[i] = s; }
-    }
-    function tryN(i, x, y, j) {
-      var s = near[j]; if (s < 0) return;
-      var dx = x * CELL - S.x[s], dy = y * CELL - S.y[s], d = dx * dx + dy * dy;
-      if (d < d2[i]) { d2[i] = d; near[i] = s; }
-    }
-    for (var pass = 0; pass < 2; pass++) {
-      var x, y, i;
-      for (y = 0; y < GH; y++) for (x = 0; x < GW; x++) {
-        i = y * GW + x;
-        if (x > 0) tryN(i, x, y, i - 1);
-        if (y > 0) { tryN(i, x, y, i - GW); if (x > 0) tryN(i, x, y, i - GW - 1); if (x < GW - 1) tryN(i, x, y, i - GW + 1); }
+    // Coastal fronds: recursive branches grown seaward from the shoreline, pruned where they touch land.
+    var C = {
+      spread: rr(0.3, 0.62), ratio: rr(0.64, 0.76), curl: rr(0.012, 0.05) * (R() < 0.5 ? 1 : -1),
+      depth: R() < 0.5 ? 6 : 7, trees: Math.round(rr(60, 95)), hueTip: rr(0.15, 0.55)
+    };
+    function frond(x, y, ang, len, depth, cs, t0, tree) {
+      var steps = Math.max(2, Math.round(len / 2.5)), st = len / steps;
+      for (var k = 0; k < steps; k++) {
+        if (segs > MAX_SEG || tree.left-- <= 0) return;
+        ang += C.curl * cs * st * (0.6 + depth * 0.35);
+        var nx = x + Math.cos(ang) * st, ny = y + Math.sin(ang) * st;
+        if (sdAt(nx, ny) < 1.2) return;
+        var f = (depth + k / steps) / C.depth;
+        seg(x, y, nx, ny, f, t0 + f * 0.5, f * tree.hueTip, tree.alpha * (1 - f * 0.45));
+        x = nx; y = ny;
       }
-      for (y = GH - 1; y >= 0; y--) for (x = GW - 1; x >= 0; x--) {
-        i = y * GW + x;
-        if (x < GW - 1) tryN(i, x, y, i + 1);
-        if (y < GH - 1) { tryN(i, x, y, i + GW); if (x < GW - 1) tryN(i, x, y, i + GW + 1); if (x > 0) tryN(i, x, y, i + GW - 1); }
+      if (depth < C.depth) {
+        var a = C.spread * rr(0.7, 1.3), l = len * C.ratio * rr(0.85, 1.1);
+        tree.q.push([x, y, ang - a, l, depth + 1, cs]);
+        tree.q.push([x, y, ang + a * rr(0.6, 1.1), l * rr(0.75, 1), depth + 1, -cs]);
+        if (R() < 0.16) tree.q.push([x, y, ang + rr(-0.2, 0.2), l * 0.8, depth + 1, cs]);
+      } else if (R() < 0.07) {
+        PV.push(x, y, 1, t0 + 0.55, R() * 6.283, rr(1, 2.2));
       }
     }
-    return { near: near, d2: d2 };
-  }
-
-  // Signed distance to the coast: positive at sea. OSM coastlines keep land on the left.
-  var CS = sampleLines(coast, 1);
-  var CF = nearestField(CS);
-  var SD = new Float32Array(GN), sign = new Int8Array(GN), queue = new Int32Array(GN), qh = 0, qt = 0;
-  (function () {
-    var band = CELL * 2.2;
-    for (var i = 0; i < GN; i++) {
-      var s = CF.near[i]; if (s < 0) continue;
-      var d = Math.sqrt(CF.d2[i]);
-      if (d <= band) {
-        var x = (i % GW) * CELL, y = ((i / GW) | 0) * CELL;
-        var cr = CS.tx[s] * (y - CS.y[s]) - CS.ty[s] * (x - CS.x[s]);
-        sign[i] = cr >= 0 ? 1 : -1; queue[qt++] = i;
+    var roots = [];
+    for (var attempt = 0, made = 0; made < C.trees && attempt < C.trees * 12; attempt++) {
+      var s = (R() * CS.n) | 0, x = CS.x[s], y = CS.y[s];
+      if (x < 4 || y < 4 || x > DW - 4 || y > DH - 4) continue;
+      var nx = -CS.ty[s], ny = CS.tx[s]; // seaward normal (right of travel)
+      if (sdAt(x + nx * 7, y + ny * 7) < 3.5) continue;
+      var tooClose = roots.some(function (r) { return Math.hypot(r[0] - x, r[1] - y) < 22; });
+      if (tooClose) continue;
+      roots.push([x, y]); made++;
+      var tree = { hueTip: C.hueTip * rr(0.6, 1.4), alpha: rr(0.38, 0.62), left: Math.round(52000 / C.trees), q: [] };
+      var ft0 = rr(0.12, 0.42);
+      tree.q.push([x + nx * 1.5, y + ny * 1.5, Math.atan2(ny, nx) + rr(-0.35, 0.35), rr(12, 34), 0, R() < 0.5 ? 1 : -1]);
+      for (var qi = 0; qi < tree.q.length && tree.left > 0; qi++) { // breadth-first, so the budget trims tips evenly
+        var b = tree.q[qi]; frond(b[0], b[1], b[2], b[3], b[4], b[5], ft0, tree);
       }
     }
-    while (qh < qt) {
-      var j = queue[qh++], jx = j % GW, sg = sign[j];
-      if (jx > 0 && !sign[j - 1]) { sign[j - 1] = sg; queue[qt++] = j - 1; }
-      if (jx < GW - 1 && !sign[j + 1]) { sign[j + 1] = sg; queue[qt++] = j + 1; }
-      if (j >= GW && !sign[j - GW]) { sign[j - GW] = sg; queue[qt++] = j - GW; }
-      if (j + GW < GN && !sign[j + GW]) { sign[j + GW] = sg; queue[qt++] = j + GW; }
-    }
-    for (var k = 0; k < GN; k++) SD[k] = Math.sqrt(CF.d2[k]) * (sign[k] || 1);
-  })();
 
-  // Unsigned distance to any street.
-  var allRoads = roads[0].concat(roads[1], roads[2]);
-  var RF = nearestField(sampleLines(allRoads, 2));
-  var RD = new Float32Array(GN);
-  for (var k = 0; k < GN; k++) RD[k] = Math.sqrt(RF.d2[k]);
-
-  function sampleGrid(F, x, y) {
-    var gx = x / CELL, gy = y / CELL;
-    if (gx < 0) gx = 0; if (gy < 0) gy = 0;
-    if (gx > GW - 1.001) gx = GW - 1.001; if (gy > GH - 1.001) gy = GH - 1.001;
-    var ix = gx | 0, iy = gy | 0, fx = gx - ix, fy = gy - iy, i = iy * GW + ix;
-    var a = F[i], b = F[i + 1], c = F[i + GW], d = F[i + GW + 1];
-    return (a + (b - a) * fx) * (1 - fy) + (c + (d - c) * fx) * fy;
-  }
-  function sdAt(x, y) { return sampleGrid(SD, x, y); }
-  function rdAt(x, y) { return sampleGrid(RD, x, y); }
-
-  // ---------- geometry buffers ----------
-  var LV = []; // line vertices: x, y, sway, reveal, hue, alpha
-  var PV = []; // sparkle points: x, y, sway, reveal, phase, size
-  var MAX_SEG = 110000, segs = 0;
-  function seg(ax, ay, bx, by, w, rev, hue, a) {
-    LV.push(ax, ay, w, rev, hue, a, bx, by, w, rev, hue, a); segs++;
-  }
-
-  // Streets as the faint engraved plate. They surface outward from a random point on the shore.
-  var origin = (function () { var s = (R() * CS.n) | 0; return [CS.x[s], CS.y[s]]; })();
-  var maxR = Math.hypot(DW, DH);
-  [[0.30, 0.95], [0.22, 0.9], [0.11, 0.85]].forEach(function (style, rank) {
-    roads[rank].forEach(function (p) {
-      for (var i = 0; i + 3 < p.length; i += 2) {
-        var rv = 0.02 + Math.hypot(p[i] - origin[0], p[i + 1] - origin[1]) / maxR * 0.55;
-        seg(p[i], p[i + 1], p[i + 2], p[i + 3], 0.06, rv, style[1], style[0]);
-      }
+    // Street fronds: branching growth that clings to the street network, so it can only travel along roads.
+    var S = { spread: rr(0.55, 1.15), ratio: rr(0.86, 0.95), depth: 7, trees: Math.round(rr(26, 42)), pull: rr(0.25, 0.45) };
+    var visited = new Uint8Array(GN);
+    var mainSegs = [];
+    roads[0].concat(roads[1]).forEach(function (p) {
+      for (var i = 0; i + 3 < p.length; i += 2) mainSegs.push([p[i], p[i + 1], p[i + 2], p[i + 3]]);
     });
-  });
+    function creep(x, y, ang, len, depth, t0, tree) {
+      var steps = Math.max(2, Math.round(len / 2)), st = len / steps;
+      for (var k = 0; k < steps; k++) {
+        if (segs > MAX_SEG || tree.left-- <= 0) return;
+        var d = rdAt(x, y), gx = rdAt(x + 1.5, y) - rdAt(x - 1.5, y), gy = rdAt(x, y + 1.5) - rdAt(x, y - 1.5);
+        var dx = Math.cos(ang) - gx * S.pull * d * 0.5, dy = Math.sin(ang) - gy * S.pull * d * 0.5;
+        ang = Math.atan2(dy, dx) + rr(-0.06, 0.06);
+        var nx = x + Math.cos(ang) * st, ny = y + Math.sin(ang) * st;
+        if (rdAt(nx, ny) > 4.2 || sdAt(nx, ny) > 1.5) return;
+        var cell = Math.round(ny / CELL) * GW + Math.round(nx / CELL), here = Math.round(y / CELL) * GW + Math.round(x / CELL);
+        if (cell !== here) { if (cell < 0 || cell >= GN || visited[cell]) return; visited[cell] = 1; }
+        var f = (depth + k / steps) / S.depth;
+        seg(x, y, nx, ny, 0.35 + f * 0.4, t0 + f * 0.5, 1 - f * 0.2, tree.alpha * (1 - f * 0.35));
+        x = nx; y = ny;
+      }
+      if (depth < S.depth) {
+        var a = S.spread * rr(0.75, 1.25), l = len * S.ratio * rr(0.85, 1.1);
+        tree.q.push([x, y, ang - a, l, depth + 1]);
+        tree.q.push([x, y, ang + a, l, depth + 1]);
+        if (R() < 0.15) tree.q.push([x, y, ang + rr(-0.1, 0.1), l, depth + 1]);
+      } else if (R() < 0.12) {
+        PV.push(x, y, 0.6, t0 + 0.55, R() * 6.283, rr(1, 1.8));
+      }
+    }
+    for (var t = 0; t < S.trees && mainSegs.length; t++) {
+      var m = mainSegs[(R() * mainSegs.length) | 0], u = R();
+      var sx = m[0] + (m[2] - m[0]) * u, sy = m[1] + (m[3] - m[1]) * u;
+      if (sdAt(sx, sy) > -2) continue;
+      var dir = Math.atan2(m[3] - m[1], m[2] - m[0]) + (R() < 0.5 ? 0 : Math.PI);
+      var tr = { alpha: rr(0.7, 1.0), left: Math.round(42000 / S.trees), q: [] };
+      var t0 = rr(0.15, 0.45);
+      tr.q.push([sx, sy, dir, rr(20, 40), 0], [sx, sy, dir + Math.PI, rr(20, 40), 0]);
+      for (var qj = 0; qj < tr.q.length && tr.left > 0; qj++) {
+        var c = tr.q[qj]; creep(c[0], c[1], c[2], c[3], c[4], t0, tr);
+      }
+    }
 
-  // Coastal fronds: recursive branches grown seaward from the shoreline, pruned where they touch land.
-  var C = {
-    spread: rr(0.3, 0.62), ratio: rr(0.64, 0.76), curl: rr(0.012, 0.05) * (R() < 0.5 ? 1 : -1),
-    depth: R() < 0.5 ? 6 : 7, trees: Math.round(rr(60, 95)), hueTip: rr(0.15, 0.55)
-  };
-  function frond(x, y, ang, len, depth, cs, t0, tree) {
-    var steps = Math.max(2, Math.round(len / 2.5)), st = len / steps;
-    for (var k = 0; k < steps; k++) {
-      if (segs > MAX_SEG || tree.left-- <= 0) return;
-      ang += C.curl * cs * st * (0.6 + depth * 0.35);
-      var nx = x + Math.cos(ang) * st, ny = y + Math.sin(ang) * st;
-      if (sdAt(nx, ny) < 1.2) return;
-      var f = (depth + k / steps) / C.depth;
-      seg(x, y, nx, ny, f, t0 + f * 0.5, f * tree.hueTip, tree.alpha * (1 - f * 0.45));
-      x = nx; y = ny;
-    }
-    if (depth < C.depth) {
-      var a = C.spread * rr(0.7, 1.3), l = len * C.ratio * rr(0.85, 1.1);
-      tree.q.push([x, y, ang - a, l, depth + 1, cs]);
-      tree.q.push([x, y, ang + a * rr(0.6, 1.1), l * rr(0.75, 1), depth + 1, -cs]);
-      if (R() < 0.16) tree.q.push([x, y, ang + rr(-0.2, 0.2), l * 0.8, depth + 1, cs]);
-    } else if (R() < 0.07) {
-      PV.push(x, y, 1, t0 + 0.55, R() * 6.283, rr(1, 2.2));
-    }
-  }
-  var roots = [];
-  for (var attempt = 0, made = 0; made < C.trees && attempt < C.trees * 12; attempt++) {
-    var s = (R() * CS.n) | 0, x = CS.x[s], y = CS.y[s];
-    if (x < 4 || y < 4 || x > DW - 4 || y > DH - 4) continue;
-    var nx = -CS.ty[s], ny = CS.tx[s]; // seaward normal (right of travel)
-    if (sdAt(x + nx * 7, y + ny * 7) < 3.5) continue;
-    var tooClose = roots.some(function (r) { return Math.hypot(r[0] - x, r[1] - y) < 22; });
-    if (tooClose) continue;
-    roots.push([x, y]); made++;
-    var tree = { hueTip: C.hueTip * rr(0.6, 1.4), alpha: rr(0.38, 0.62), left: Math.round(52000 / C.trees), q: [] };
-    var ft0 = rr(0.12, 0.42);
-    tree.q.push([x + nx * 1.5, y + ny * 1.5, Math.atan2(ny, nx) + rr(-0.35, 0.35), rr(12, 34), 0, R() < 0.5 ? 1 : -1]);
-    for (var qi = 0; qi < tree.q.length && tree.left > 0; qi++) { // breadth-first, so the budget trims tips evenly
-      var b = tree.q[qi]; frond(b[0], b[1], b[2], b[3], b[4], b[5], ft0, tree);
-    }
-  }
+    var look = { spacing: rr(11, 17), warp: rr(18, 42), seed: [rr(0, 90), rr(0, 90)] };
 
-  // Street fronds: branching growth that clings to the street network, so it can only travel along roads.
-  var S = { spread: rr(0.55, 1.15), ratio: rr(0.86, 0.95), depth: 7, trees: Math.round(rr(26, 42)), pull: rr(0.25, 0.45) };
-  var visited = new Uint8Array(GN);
-  var mainSegs = [];
-  roads[0].concat(roads[1]).forEach(function (p) {
-    for (var i = 0; i + 3 < p.length; i += 2) mainSegs.push([p[i], p[i + 1], p[i + 2], p[i + 3]]);
-  });
-  function creep(x, y, ang, len, depth, t0, tree) {
-    var steps = Math.max(2, Math.round(len / 2)), st = len / steps;
-    for (var k = 0; k < steps; k++) {
-      if (segs > MAX_SEG || tree.left-- <= 0) return;
-      var d = rdAt(x, y), gx = rdAt(x + 1.5, y) - rdAt(x - 1.5, y), gy = rdAt(x, y + 1.5) - rdAt(x, y - 1.5);
-      var dx = Math.cos(ang) - gx * S.pull * d * 0.5, dy = Math.sin(ang) - gy * S.pull * d * 0.5;
-      ang = Math.atan2(dy, dx) + rr(-0.06, 0.06);
-      var nx = x + Math.cos(ang) * st, ny = y + Math.sin(ang) * st;
-      if (rdAt(nx, ny) > 4.2 || sdAt(nx, ny) > 1.5) return;
-      var cell = Math.round(ny / CELL) * GW + Math.round(nx / CELL), here = Math.round(y / CELL) * GW + Math.round(x / CELL);
-      if (cell !== here) { if (cell < 0 || cell >= GN || visited[cell]) return; visited[cell] = 1; }
-      var f = (depth + k / steps) / S.depth;
-      seg(x, y, nx, ny, 0.35 + f * 0.4, t0 + f * 0.5, 1 - f * 0.2, tree.alpha * (1 - f * 0.35));
-      x = nx; y = ny;
+    // signed distance → RG 16-bit texture (sampled manually, bilinear in shader)
+    var texPx = new Uint8Array(GN * 4);
+    for (var ti = 0; ti < GN; ti++) {
+      var tv = Math.max(0, Math.min(65535, Math.round((Math.max(-400, Math.min(1640, SD[ti])) + 400) * 32)));
+      texPx[ti * 4] = tv >> 8; texPx[ti * 4 + 1] = tv & 255; texPx[ti * 4 + 3] = 255;
     }
-    if (depth < S.depth) {
-      var a = S.spread * rr(0.75, 1.25), l = len * S.ratio * rr(0.85, 1.1);
-      tree.q.push([x, y, ang - a, l, depth + 1]);
-      tree.q.push([x, y, ang + a, l, depth + 1]);
-      if (R() < 0.15) tree.q.push([x, y, ang + rr(-0.1, 0.1), l, depth + 1]);
-    } else if (R() < 0.12) {
-      PV.push(x, y, 0.6, t0 + 0.55, R() * 6.283, rr(1, 1.8));
-    }
-  }
-  for (var t = 0; t < S.trees && mainSegs.length; t++) {
-    var m = mainSegs[(R() * mainSegs.length) | 0], u = R();
-    var sx = m[0] + (m[2] - m[0]) * u, sy = m[1] + (m[3] - m[1]) * u;
-    if (sdAt(sx, sy) > -2) continue;
-    var dir = Math.atan2(m[3] - m[1], m[2] - m[0]) + (R() < 0.5 ? 0 : Math.PI);
-    var tr = { alpha: rr(0.7, 1.0), left: Math.round(42000 / S.trees), q: [] };
-    var t0 = rr(0.15, 0.45);
-    tr.q.push([sx, sy, dir, rr(20, 40), 0], [sx, sy, dir + Math.PI, rr(20, 40), 0]);
-    for (var qj = 0; qj < tr.q.length && tr.left > 0; qj++) {
-      var c = tr.q[qj]; creep(c[0], c[1], c[2], c[3], c[4], t0, tr);
-    }
+    return { lines: new Float32Array(LV), points: new Float32Array(PV), tex: texPx, GW: GW, GH: GH, CELL: CELL, look: look };
+
   }
 
   // ---------- WebGL ----------
@@ -486,40 +507,30 @@ h1 .ltd {
   gl.bindBuffer(gl.ARRAY_BUFFER, quad);
   gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
 
-  var lineBuf = gl.createBuffer();
-  gl.bindBuffer(gl.ARRAY_BUFFER, lineBuf);
-  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(LV), gl.STATIC_DRAW);
-  var lineCount = LV.length / 6;
-  var ptBuf = gl.createBuffer();
-  gl.bindBuffer(gl.ARRAY_BUFFER, ptBuf);
-  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(PV), gl.STATIC_DRAW);
-  var ptCount = PV.length / 6;
-  LV = PV = null;
-
-  // signed distance → RG 16-bit texture (sampled manually, bilinear in shader)
-  var tex = gl.createTexture();
-  (function () {
-    var px = new Uint8Array(GN * 4);
-    for (var i = 0; i < GN; i++) {
-      var v = Math.max(0, Math.min(65535, Math.round((Math.max(-400, Math.min(1640, SD[i])) + 400) * 32)));
-      px[i * 4] = v >> 8; px[i * 4 + 1] = v & 255; px[i * 4 + 3] = 255;
-    }
+  var lineBuf = gl.createBuffer(), ptBuf = gl.createBuffer(), tex = gl.createTexture();
+  var lineCount = 0, ptCount = 0, GW = 1, GH = 1, CELL = 3, look = null;
+  function upload(g) {
+    gl.bindBuffer(gl.ARRAY_BUFFER, lineBuf);
+    gl.bufferData(gl.ARRAY_BUFFER, g.lines, gl.STATIC_DRAW);
+    lineCount = g.lines.length / 6;
+    gl.bindBuffer(gl.ARRAY_BUFFER, ptBuf);
+    gl.bufferData(gl.ARRAY_BUFFER, g.points, gl.STATIC_DRAW);
+    ptCount = g.points.length / 6;
+    GW = g.GW; GH = g.GH; CELL = g.CELL; look = g.look;
     gl.bindTexture(gl.TEXTURE_2D, tex);
     gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, GW, GH, 0, gl.RGBA, gl.UNSIGNED_BYTE, px);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, GW, GH, 0, gl.RGBA, gl.UNSIGNED_BYTE, g.tex);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-  })();
-
-  var look = { spacing: rr(11, 17), warp: rr(18, 42), seed: [rr(0, 90), rr(0, 90)] };
+  }
 
   // ---------- view: cover the viewport, keep Portsea Island in frame ----------
   var view = { scale: 1, ox: 0, oy: 0, dpr: 1 };
   function layout() {
     var W = window.innerWidth, H = window.innerHeight;
-    var dpr = Math.min(window.devicePixelRatio || 1, 2);
+    var dpr = soft ? 1 : Math.min(window.devicePixelRatio || 1, 2);
     if (W * H * dpr * dpr > 3.4e6) dpr = Math.sqrt(3.4e6 / (W * H));
     canvas.width = Math.round(W * dpr); canvas.height = Math.round(H * dpr);
     var portrait = H > W * 1.05;
@@ -575,18 +586,45 @@ h1 .ltd {
     }
   }
 
-  var still = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-  var start = performance.now();
-  layout();
-  window.addEventListener("resize", function () { layout(); if (still) draw(40, 1); });
+  // Without a GPU (software WebGL) every animated frame would run on the CPU: draw one still frame instead.
+  var soft = (function () {
+    var info = gl.getExtension("WEBGL_debug_renderer_info");
+    var name = String(gl.getParameter(info ? info.UNMASKED_RENDERER_WEBGL : gl.RENDERER) || "");
+    return /swiftshader|llvmpipe|softpipe|software|basic render/i.test(name);
+  })();
+  var still = soft || (window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches);
+  var ready = false, start = 0;
 
-  if (still) { draw(40, 1); return; }
-  function frame(now) {
-    var t = (now - start) / 1000;
-    var r = Math.min(1, t / 6.5); r = 1 - Math.pow(1 - r, 2.2);
-    draw(t + 40, r);
-    requestAnimationFrame(frame);
+  function begin(g) {
+    upload(g);
+    layout();
+    ready = true;
+    canvas.classList.add("on");
+    if (still) { draw(40, 1); return; }
+    start = performance.now();
+    requestAnimationFrame(function frame(now) {
+      var t = (now - start) / 1000;
+      var r = Math.min(1, t / 6.5); r = 1 - Math.pow(1 - r, 2.2);
+      draw(t + 40, r);
+      requestAnimationFrame(frame);
+    });
   }
-  requestAnimationFrame(frame);
+  window.addEventListener("resize", function () { if (!ready) return; layout(); if (still) draw(40, 1); });
+
+  var seedArr = new Uint32Array(1);
+  (window.crypto || window.msCrypto).getRandomValues(seedArr);
+  var seed = seedArr[0];
+  try {
+    var src = "var generate = " + generate.toString() + ";\n" +
+      "onmessage = function (e) { var g = generate(e.data.map, e.data.seed);" +
+      " postMessage(g, [g.lines.buffer, g.points.buffer, g.tex.buffer]); };";
+    var url = URL.createObjectURL(new Blob([src], { type: "text/javascript" }));
+    var worker = new Worker(url);
+    worker.onmessage = function (e) { begin(e.data); worker.terminate(); URL.revokeObjectURL(url); };
+    worker.onerror = function () { worker.terminate(); setTimeout(function () { begin(generate(MAP, seed)); }, 0); };
+    worker.postMessage({ map: MAP, seed: seed });
+  } catch (err) {
+    setTimeout(function () { begin(generate(MAP, seed)); }, 0);
+  }
 })();
 </script>
